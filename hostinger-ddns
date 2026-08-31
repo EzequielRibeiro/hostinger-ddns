@@ -5,53 +5,35 @@ PROGRAM="hostinger-ddns"
 CONFIG_FILE="${HOSTINGER_DDNS_CONFIG:-/etc/hostinger-ddns/hostinger-ddns.conf}"
 API_BASE="https://developers.hostinger.com/api/dns/v1"
 
-log() {
-    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
-}
-
-die() {
-    log "ERRO: $*" >&2
-    exit 1
-}
-
-need_cmd() {
-    command -v "$1" >/dev/null 2>&1 || die "Comando obrigatório não encontrado: $1"
-}
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+die() { log "ERRO: $*" >&2; exit 1; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Comando obrigatório não encontrado: $1"; }
 
 load_config() {
     [[ -r "$CONFIG_FILE" ]] || die "Configuração não encontrada ou sem permissão de leitura: $CONFIG_FILE"
-
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
-
     : "${DOMAIN:?DOMAIN não definido}"
     : "${RECORD:?RECORD não definido}"
     : "${TTL:?TTL não definido}"
     : "${TOKEN_FILE:?TOKEN_FILE não definido}"
-
     STATE_DIR="${STATE_DIR:-/var/lib/hostinger-ddns}"
     STATE_FILE="${STATE_FILE:-${STATE_DIR}/state}"
     FORCE_VERIFY_SECONDS="${FORCE_VERIFY_SECONDS:-86400}"
-
     FQDN="${RECORD}.${DOMAIN}"
-
     [[ -r "$TOKEN_FILE" ]] || die "Token não encontrado ou sem permissão de leitura: $TOKEN_FILE"
     HOSTINGER_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
     [[ -n "$HOSTINGER_TOKEN" ]] || die "Arquivo de token está vazio: $TOKEN_FILE"
 }
 
-ensure_state_dir() {
-    install -d -m 0750 "$STATE_DIR"
-}
+ensure_state_dir() { install -d -m 0750 "$STATE_DIR"; }
 
 validate_ipv4() {
     local ip="$1" IFS=.
     local -a octets
-
     [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
     read -r -a octets <<< "$ip"
     [[ ${#octets[@]} -eq 4 ]] || return 1
-
     local octet
     for octet in "${octets[@]}"; do
         ((10#$octet >= 0 && 10#$octet <= 255)) || return 1
@@ -60,82 +42,51 @@ validate_ipv4() {
 
 get_public_ipv4() {
     local ip=""
-
     if ip="$(curl -4fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null)"; then
-        ip="${ip//$'\r'/}"
-        ip="${ip//$'\n'/}"
-        if validate_ipv4 "$ip"; then
-            printf '%s\n' "$ip"
-            return 0
-        fi
+        ip="${ip//$'\r'/}"; ip="${ip//$'\n'/}"
+        validate_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
     fi
-
     if ip="$(curl -4fsS --connect-timeout 5 --max-time 10 https://ifconfig.me/ip 2>/dev/null)"; then
-        ip="${ip//$'\r'/}"
-        ip="${ip//$'\n'/}"
-        if validate_ipv4 "$ip"; then
-            printf '%s\n' "$ip"
-            return 0
-        fi
+        ip="${ip//$'\r'/}"; ip="${ip//$'\n'/}"
+        validate_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
     fi
-
     return 1
 }
 
 read_state_value() {
     local key="$1"
     [[ -r "$STATE_FILE" ]] || return 1
-
-    awk -F= -v wanted="$key" '
-        $1 == wanted {
-            sub(/^[^=]*=/, "", $0)
-            print
-            exit
-        }
-    ' "$STATE_FILE"
+    awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, "", $0); print; exit }' "$STATE_FILE"
 }
 
 write_state() {
-    local ip="$1"
-    local now
+    local ip="$1" now tmp
     now="$(date +%s)"
-
     ensure_state_dir
-
-    local tmp
     tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
-
     {
         printf 'LAST_CONFIRMED_IP=%s\n' "$ip"
         printf 'LAST_VERIFIED_EPOCH=%s\n' "$now"
         printf 'FQDN=%s\n' "$FQDN"
     } > "$tmp"
-
     chmod 0640 "$tmp"
     mv -f "$tmp" "$STATE_FILE"
 }
 
 state_allows_skip() {
-    local public_ip="$1"
-    local last_ip last_verified now age
-
+    local public_ip="$1" last_ip last_verified now age
     last_ip="$(read_state_value LAST_CONFIRMED_IP 2>/dev/null || true)"
     last_verified="$(read_state_value LAST_VERIFIED_EPOCH 2>/dev/null || true)"
-
     [[ "$last_ip" == "$public_ip" ]] || return 1
     [[ "$last_verified" =~ ^[0-9]+$ ]] || return 1
     [[ "$FORCE_VERIFY_SECONDS" =~ ^[0-9]+$ ]] || return 1
-
     now="$(date +%s)"
-    age=$(( now - last_verified ))
-
+    age=$((now - last_verified))
     (( age >= 0 && age < FORCE_VERIFY_SECONDS ))
 }
 
 api_get_zone() {
-    curl -fsS \
-        --connect-timeout 10 \
-        --max-time 30 \
+    curl -fsS --connect-timeout 10 --max-time 30 \
         -H "Authorization: Bearer ${HOSTINGER_TOKEN}" \
         -H "Accept: application/json" \
         "${API_BASE}/zones/${DOMAIN}"
@@ -143,48 +94,25 @@ api_get_zone() {
 
 get_hostinger_ipv4() {
     local json="$1"
-    jq -r \
-        --arg name "$RECORD" \
-        '
-        .[]
-        | select(.name == $name and .type == "A")
+    jq -r --arg name "$RECORD" '
+        .[] | select(.name == $name and .type == "A")
         | .records[]
         | select((.is_disabled // false) == false)
         | .content
-        ' <<< "$json" | head -n1
+    ' <<< "$json" | head -n1
 }
 
 build_payload() {
     local ip="$1"
-
-    jq -n \
-        --arg name "$RECORD" \
-        --arg ip "$ip" \
-        --argjson ttl "$TTL" \
-        '{
-            overwrite: true,
-            zone: [
-                {
-                    name: $name,
-                    type: "A",
-                    ttl: $ttl,
-                    records: [
-                        {
-                            content: $ip
-                        }
-                    ]
-                }
-            ]
-        }'
+    jq -n --arg name "$RECORD" --arg ip "$ip" --argjson ttl "$TTL" '{
+        overwrite: true,
+        zone: [{name: $name, type: "A", ttl: $ttl, records: [{content: $ip}]}]
+    }'
 }
 
 validate_payload() {
     local payload="$1"
-
-    curl -fsS \
-        --connect-timeout 10 \
-        --max-time 30 \
-        -X POST \
+    curl -fsS --connect-timeout 10 --max-time 30 -X POST \
         -H "Authorization: Bearer ${HOSTINGER_TOKEN}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
@@ -194,11 +122,7 @@ validate_payload() {
 
 put_payload() {
     local payload="$1"
-
-    curl -fsS \
-        --connect-timeout 10 \
-        --max-time 30 \
-        -X PUT \
+    curl -fsS --connect-timeout 10 --max-time 30 -X PUT \
         -H "Authorization: Bearer ${HOSTINGER_TOKEN}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
@@ -208,33 +132,29 @@ put_payload() {
 
 cmd_check() {
     load_config
-
     local public_ip zone_json dns_ip
     public_ip="$(get_public_ipv4)" || die "Não foi possível detectar o IPv4 público."
     zone_json="$(api_get_zone)" || die "Falha ao consultar a zona DNS na Hostinger."
     dns_ip="$(get_hostinger_ipv4 "$zone_json")"
-
     log "FQDN: ${FQDN}"
     log "IPv4 público: ${public_ip}"
     log "IPv4 Hostinger: ${dns_ip:-<registro A não encontrado>}"
-
     if [[ "$dns_ip" == "$public_ip" ]]; then
         write_state "$public_ip"
         log "OK: DNS já está atualizado."
         return 0
     fi
-
     log "ATENÇÃO: DNS precisa ser atualizado."
     return 2
 }
 
 cmd_update() {
     load_config
-
+    local force="${1:-false}"
     local public_ip zone_json dns_ip payload response
     public_ip="$(get_public_ipv4)" || die "Não foi possível detectar o IPv4 público."
 
-    if state_allows_skip "$public_ip"; then
+    if [[ "$force" != "true" ]] && state_allows_skip "$public_ip"; then
         log "Sem alteração: IPv4 público continua ${public_ip}; API Hostinger não consultada."
         return 0
     fi
@@ -242,33 +162,115 @@ cmd_update() {
     zone_json="$(api_get_zone)" || die "Falha ao consultar a zona DNS na Hostinger."
     dns_ip="$(get_hostinger_ipv4 "$zone_json")"
 
-    if [[ "$dns_ip" == "$public_ip" ]]; then
+    if [[ "$force" != "true" && "$dns_ip" == "$public_ip" ]]; then
         write_state "$public_ip"
         log "Sem alteração: ${FQDN} já aponta para ${public_ip}."
         return 0
     fi
 
-    log "Alteração detectada: ${FQDN}: ${dns_ip:-<ausente>} -> ${public_ip}"
+    if [[ "$force" == "true" ]]; then
+        log "Atualização forçada: ${FQDN}: ${dns_ip:-<ausente>} -> ${public_ip}"
+    else
+        log "Alteração detectada: ${FQDN}: ${dns_ip:-<ausente>} -> ${public_ip}"
+    fi
 
     payload="$(build_payload "$public_ip")"
-
     validate_payload "$payload" || die "A Hostinger rejeitou a validação do novo registro DNS."
     response="$(put_payload "$payload")" || die "Falha ao atualizar o registro DNS na Hostinger."
-
     write_state "$public_ip"
-
     log "Atualização aceita pela Hostinger: ${FQDN} -> ${public_ip}"
     [[ -n "$response" ]] && printf '%s\n' "$response"
 }
 
+dns_ipv4() {
+    local server="$1"
+    dig +time=3 +tries=1 +short "@${server}" "$FQDN" A 2>/dev/null \
+        | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'
+}
+
+local_ipv4() {
+    getent ahostsv4 "$FQDN" 2>/dev/null | awk 'NR==1 {print $1}'
+}
+
+print_verify_row() {
+    local label="$1" value="$2" expected="$3"
+    local status="MISMATCH"
+    [[ "$value" == "$expected" ]] && status="OK"
+    [[ -z "$value" ]] && { value="<sem resposta>"; status="ERROR"; }
+    printf '%-24s %-18s %s\n' "$label" "$value" "$status"
+    [[ "$status" == "OK" ]]
+}
+
+cmd_verify_once() {
+    load_config
+    need_cmd dig
+    need_cmd getent
+
+    local public_ip zone_json api_ip ns authoritative_ip
+    local cf_ip google_ip quad9_ip local_ip
+    local failures=0
+
+    public_ip="$(get_public_ipv4)" || die "Não foi possível detectar o IPv4 público."
+    zone_json="$(api_get_zone)" || die "Falha ao consultar a zona DNS na Hostinger."
+    api_ip="$(get_hostinger_ipv4 "$zone_json")"
+
+    ns="$(dig +time=3 +tries=1 +short NS "$DOMAIN" 2>/dev/null | head -n1 | sed 's/\.$//')"
+    authoritative_ip=""
+    [[ -n "$ns" ]] && authoritative_ip="$(dns_ipv4 "$ns" || true)"
+
+    cf_ip="$(dns_ipv4 1.1.1.1 || true)"
+    google_ip="$(dns_ipv4 8.8.8.8 || true)"
+    quad9_ip="$(dns_ipv4 9.9.9.9 || true)"
+    local_ip="$(local_ipv4 || true)"
+
+    echo "Verificação DNS: ${FQDN}"
+    echo
+    printf '%-24s %-18s %s\n' "Origem" "IPv4" "Estado"
+    printf '%-24s %-18s %s\n' "------------------------" "------------------" "--------"
+    printf '%-24s %-18s %s\n' "IPv4 público" "$public_ip" "REFERÊNCIA"
+    print_verify_row "Hostinger API" "$api_ip" "$public_ip" || failures=$((failures + 1))
+    print_verify_row "DNS autoritativo" "$authoritative_ip" "$public_ip" || failures=$((failures + 1))
+    print_verify_row "Cloudflare 1.1.1.1" "$cf_ip" "$public_ip" || failures=$((failures + 1))
+    print_verify_row "Google 8.8.8.8" "$google_ip" "$public_ip" || failures=$((failures + 1))
+    print_verify_row "Quad9 9.9.9.9" "$quad9_ip" "$public_ip" || failures=$((failures + 1))
+    print_verify_row "Resolver local" "$local_ip" "$public_ip" || failures=$((failures + 1))
+    echo
+    echo "Nameserver consultado: ${ns:-<não encontrado>}"
+
+    if (( failures == 0 )); then
+        echo "STATUS: HEALTHY"
+        return 0
+    fi
+
+    echo "STATUS: DEGRADED (${failures} divergência(s))"
+    return 2
+}
+
+cmd_verify() {
+    local do_update="${1:-false}"
+    set +e
+    cmd_verify_once
+    local rc=$?
+    set -e
+
+    if [[ "$do_update" != "true" || $rc -eq 0 ]]; then
+        return "$rc"
+    fi
+
+    echo
+    echo "Divergência detectada. Executando update --force..."
+    cmd_update true
+    echo
+    echo "Repetindo verificação..."
+    cmd_verify_once
+}
+
 cmd_test() {
     load_config
-
     local public_ip zone_json dns_ip
     public_ip="$(get_public_ipv4)" || die "Teste falhou: não foi possível detectar o IPv4 público."
     zone_json="$(api_get_zone)" || die "Teste falhou: não foi possível autenticar/consultar a API Hostinger."
     dns_ip="$(get_hostinger_ipv4 "$zone_json")"
-
     log "API Hostinger: OK"
     log "Domínio: ${DOMAIN}"
     log "Registro: ${RECORD} (${FQDN})"
@@ -280,17 +282,14 @@ cmd_test() {
 
 cmd_status() {
     load_config
-
     local last_ip last_verified last_verified_text
     last_ip="$(read_state_value LAST_CONFIRMED_IP 2>/dev/null || true)"
     last_verified="$(read_state_value LAST_VERIFIED_EPOCH 2>/dev/null || true)"
-
     if [[ "$last_verified" =~ ^[0-9]+$ ]]; then
         last_verified_text="$(date -d "@${last_verified}" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || printf '%s' "$last_verified")"
     else
         last_verified_text="<nunca>"
     fi
-
     echo "Programa:                 ${PROGRAM}"
     echo "Configuração:             ${CONFIG_FILE}"
     echo "Zona:                     ${DOMAIN}"
@@ -303,7 +302,6 @@ cmd_status() {
     echo "Última verificação API:   ${last_verified_text}"
     echo "Revalidação forçada após: ${FORCE_VERIFY_SECONDS}s"
     echo
-
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --no-pager --full status hostinger-ddns.timer 2>/dev/null || true
         echo
@@ -316,18 +314,20 @@ usage() {
 Uso:
   hostinger-ddns check
   hostinger-ddns update
+  hostinger-ddns update --force
+  hostinger-ddns verify
+  hostinger-ddns verify --update
   hostinger-ddns test
   hostinger-ddns status
 
 Comandos:
-  check   Consulta a Hostinger e compara o IPv4 público com o registro A.
-  update  Usa cache local e só consulta a API se necessário.
-  test    Testa Internet, token e leitura da API. Não altera DNS.
-  status  Mostra configuração, cache local e estado dos units systemd.
-
-Cache:
-  O último IP confirmado é salvo localmente. Se o IPv4 público não mudou,
-  chamadas à API são evitadas até o período FORCE_VERIFY_SECONDS expirar.
+  check            Consulta a Hostinger e compara o IPv4 público com o registro A.
+  update           Atualiza quando necessário; usa cache local.
+  update --force   Ignora o cache e força a gravação do IPv4 atual na Hostinger.
+  verify           Valida API, DNS autoritativo, resolvers públicos e resolver local.
+  verify --update  Se houver divergência, força update e repete a verificação.
+  test             Testa Internet, token e leitura da API sem alterar DNS.
+  status           Mostra configuração, cache e estado dos units systemd.
 
 Variável opcional:
   HOSTINGER_DDNS_CONFIG=/caminho/config.conf
@@ -339,9 +339,22 @@ main() {
     need_cmd jq
 
     case "${1:-}" in
-        check)  cmd_check ;;
-        update) cmd_update ;;
-        test)   cmd_test ;;
+        check) cmd_check ;;
+        update)
+            case "${2:-}" in
+                "") cmd_update false ;;
+                --force) cmd_update true ;;
+                *) die "Opção inválida para update: ${2}" ;;
+            esac
+            ;;
+        verify)
+            case "${2:-}" in
+                "") cmd_verify false ;;
+                --update) cmd_verify true ;;
+                *) die "Opção inválida para verify: ${2}" ;;
+            esac
+            ;;
+        test) cmd_test ;;
         status) cmd_status ;;
         -h|--help|help|"") usage ;;
         *) die "Comando desconhecido: $1" ;;
