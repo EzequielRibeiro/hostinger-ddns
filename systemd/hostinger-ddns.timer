@@ -1,0 +1,12 @@
+[Unit]
+Description=Check public IP and update Hostinger DNS every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20s
+Persistent=true
+Unit=hostinger-ddns.service
+
+[Install]
+WantedBy=timers.target
