@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0 - 2026-08-30
+
+- Added `hostinger-ddns verify` to compare the public IPv4 with Hostinger API, authoritative DNS, Cloudflare, Google, Quad9 and the local resolver.
+- Added `hostinger-ddns verify --update` to force an update when a divergence is detected and then repeat verification.
+- Added `hostinger-ddns update --force` to bypass the local cache and force writing the current public IPv4 to Hostinger.
+- Installer now installs `dnsutils` for authoritative/public DNS verification.
+
 ## 1.0.0 - 2026-08-30
 
 - Initial public release.
