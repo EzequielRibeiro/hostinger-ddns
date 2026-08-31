@@ -1,0 +1,26 @@
+[Unit]
+Description=Hostinger DDNS updater for controller.capivaradsm.com.br
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hostinger-ddns update
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+# Leitura de configuração/token e escrita apenas do estado local.
+ReadOnlyPaths=/etc/hostinger-ddns
+ReadWritePaths=/var/lib/hostinger-ddns
